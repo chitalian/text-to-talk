@@ -17,6 +17,8 @@ expo-env.d.ts
 *.p12
 *.key
 *.mobileprovision
+*.cer
+*.csr
 
 # Metro
 .metro-health-check*
@@ -30,8 +32,10 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
-.env*.local
+# env files - real values live here, never commit
+.env
+.env.*
+!.env.example
 
 # typescript
 *.tsbuildinfo
@@ -39,3 +43,11 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# iOS signing material - never commit
+credentials/
+credentials.json
+
+# account-specific config - never commit
+eas.submit.local.json
+app.json
