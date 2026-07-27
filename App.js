@@ -79,8 +79,17 @@ function scoreVoice(v) {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Each line becomes its own sentence. Collapsing newlines into plain spaces
+// ran the lines together with no pause, so a list read as one long breath.
 const polish = (t) =>
-  t.replace(/\s+/g, ' ').replace(/\.{3,}/g, ', ').replace(/([A-Za-z0-9)\]"'])$/, '$1.').trim();
+  t
+    .replace(/\.{3,}/g, ', ')
+    .split(/\n+/)
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .filter(Boolean)
+    .map((line) => (/[.!?,;:]$/.test(line) ? line : line + '.'))
+    .join(' ')
+    .trim();
 
 const cleanName = (v) => (v.name || 'Voice').replace(/\s*\((enhanced|premium|compact)\)/i, '');
 
@@ -905,7 +914,7 @@ const st = StyleSheet.create({
 
   composer: { backgroundColor: C.ink2, borderRadius: 26, padding: 18, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
   composerLive: { borderColor: 'rgba(245,180,97,0.55)' },
-  box: { color: C.text, fontSize: 27, fontWeight: '600', lineHeight: 34, minHeight: 140, textAlignVertical: 'top' },
+  box: { color: C.text, fontSize: 27, fontWeight: '600', lineHeight: 40, minHeight: 140, textAlignVertical: 'top' },
   actions: { flexDirection: 'row', gap: 10, marginTop: 14 },
   btn: { borderRadius: 16, minHeight: 58, alignItems: 'center', justifyContent: 'center' },
   speak: { flex: 1, backgroundColor: C.honey },
