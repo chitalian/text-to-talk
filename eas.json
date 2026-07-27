@@ -26,6 +26,18 @@
     },
     "production": {
       "autoIncrement": true
+    },
+    "production-local-signing": {
+      "extends": "production",
+      "credentialsSource": "local"
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleTeamId": "$APPLE_TEAM_ID",
+        "ascAppId": "$ASC_APP_ID"
+      }
     }
   }
 }

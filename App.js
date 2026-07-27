@@ -2,15 +2,15 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   View, Text, TextInput, Pressable, ScrollView, StyleSheet, Platform,
   Modal, StatusBar, SafeAreaView, KeyboardAvoidingView, Switch, Animated, Easing,
-  AppState,
+  AppState, ActivityIndicator,
 } from 'react-native';
 import Slider from '@react-native-community/slider';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Speech from 'expo-speech';
 import * as Haptics from 'expo-haptics';
 import { setAudioModeAsync } from 'expo-audio';
-import { models, useTextToSpeech } from 'react-native-executorch';
-import { playSamples, stopPlayback, onPlaybackEnd } from './src/naturalVoice';
+import { models, useTextToSpeech } from './src/tts';
+import { startStream, playSamples, stopPlayback } from './src/naturalVoice';
 
 /* ---------- palette (from the Out Loud demo) ---------- */
 const C = {
@@ -127,7 +127,8 @@ export default function App() {
   const nat = useTextToSpeech(natConfig, { preventLoad: !natOn });
   const natRef = useRef(nat);
   natRef.current = nat;
-  const endSubRef = useRef(null);
+  // True while weights are downloading or the model is warming up.
+  const natBusy = natOn && !nat.isReady && !nat.error;
   // Bumped on every speak(). Generation is async, so a slow utterance that
   // resolves after she has already tapped something else must not play.
   const genRef = useRef(0);
@@ -179,19 +180,36 @@ export default function App() {
       }
       if (!api.isReady) { await wait(250); continue; }
 
+      const done = () => { if (mine === genRef.current) setSpeaking(false); };
+
+      // Streaming: start playing the first chunk while the rest is still being
+      // synthesised. Rendering the whole sentence first is what caused the
+      // noticeable pause between tapping Speak and hearing anything.
       try {
-        const audio = await api.forward({ text: polish(t), speed: pr.rate || 1 });
-        if (mine !== genRef.current) return true;
-        const player = await playSamples(audio);
-        if (mine !== genRef.current) { stopPlayback(); return true; }
-        endSubRef.current = onPlaybackEnd(player, () => {
-          if (mine === genRef.current) setSpeaking(false);
+        const stream = startStream(done);
+        await api.stream({
+          text: polish(t),
+          speed: pr.rate || 1,
+          stopAutomatically: true,
+          onNext: (audio) => { if (mine === genRef.current) stream.push(audio); },
+          onEnd: () => stream.end(),
         });
+        if (mine !== genRef.current) { stopPlayback(); return true; }
+        stream.end();     // no-op if onEnd already fired
         setNatFallback(null);
         return true;
-      } catch (e) {
-        setNatFallback(String((e && e.message) || e));
-        await wait(150);
+      } catch (streamErr) {
+        // Some builds may not support streaming; one-shot still beats silence.
+        try {
+          const audio = await api.forward({ text: polish(t), speed: pr.rate || 1 });
+          if (mine !== genRef.current) return true;
+          await playSamples(audio, done);
+          setNatFallback(null);
+          return true;
+        } catch (e) {
+          setNatFallback(String((e && e.message) || e));
+          await wait(150);
+        }
       }
     }
     return false;
@@ -204,7 +222,6 @@ export default function App() {
 
     Speech.stop();
     stopPlayback();
-    if (endSubRef.current) { endSubRef.current(); endSubRef.current = null; }
 
     lastRef.current = t;
     if (log) logHistory(t);
@@ -259,8 +276,16 @@ export default function App() {
     try {
       const all = await Speech.getAvailableVoicesAsync();
       const eng = all.filter((v) => /^en/i.test(v.language || ''));
+      // Some platforms report the same voice twice; duplicates collide on the
+      // list key and can render or omit rows unpredictably.
+      const seen = new Set();
       const list = (eng.length ? eng : all)
-        .slice()
+        .filter((v) => {
+          const k = v.identifier || v.name;
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        })
         .sort((a, b) => scoreVoice(b) - scoreVoice(a) || (a.name || '').localeCompare(b.name || ''));
       setVoices(list);
       setPrefs((prev) => {
@@ -294,10 +319,29 @@ export default function App() {
 
   // speak() reads prefsRef, which only syncs on render. Update it inline so the
   // preview uses the voice just tapped rather than the previous one.
+  // Picking any voice also decides the engine, so the one list is the single
+  // source of truth: an Apple voice switches to the system engine, a natural
+  // voice switches to the on-device one.
   const pickVoice = (id) => {
-    prefsRef.current = { ...prefsRef.current, voice: id };
-    setPrefs((p) => ({ ...p, voice: id }));
+    prefsRef.current = { ...prefsRef.current, voice: id, engine: 'system' };
+    setPrefs((p) => ({ ...p, voice: id, engine: 'system' }));
     speakPreview();
+  };
+
+  const pickNaturalVoice = (id) => {
+    // Changing the voice swaps the loaded model. Starting a second load while
+    // one is still in flight crashes the native runtime, so refuse until the
+    // current one settles. The row shows its progress while this is true.
+    if (natBusy && id !== prefs.natVoice) return;
+    if (id === prefs.natVoice && natOn) { if (nat.isReady) speakPreview(); return; }
+
+    stopPlayback();
+    genRef.current++;               // abandon anything mid-flight
+    prefsRef.current = { ...prefsRef.current, natVoice: id, engine: 'natural' };
+    setPrefs((p) => ({ ...p, natVoice: id, engine: 'natural' }));
+    // Previewing before the weights are on disk would just play the Apple
+    // voice and read as a bug, so wait until it can actually speak.
+    if (natRef.current && natRef.current.isReady) speakPreview();
   };
 
   // Puts voice, speed and pitch back where they started. Deliberately leaves
@@ -365,6 +409,9 @@ export default function App() {
   /* ================= derived ================= */
   const selectedVoice = voices.find((v) => v.identifier === prefs.voice);
   const goodVoices = voices.filter((v) => scoreVoice(v) >= 40);
+  const currentVoiceLabel = natOn
+    ? `${natVoiceById(prefs.natVoice).label} · Natural`
+    : selectedVoice ? cleanName(selectedVoice) : 'Default voice';
   const qv = histExpanded ? query.trim().toLowerCase() : '';
   const matches = qv ? history.filter((h) => h.t.toLowerCase().includes(qv)) : history;
   const limit = histExpanded ? shown : PEEK;
@@ -414,15 +461,26 @@ export default function App() {
                   </Pressable>
                 </View>
 
-                {natOn && !nat.isReady && !nat.error && (
+                {natBusy && (
                   <View style={st.natNote}>
-                    <Text style={st.natNoteT}>
-                      {nat.downloadProgress > 0 && nat.downloadProgress < 1
-                        ? `Downloading voice… ${Math.round(nat.downloadProgress * 100)}%`
-                        : 'Preparing voice…'}
-                    </Text>
+                    <View style={st.rowLine}>
+                      <Text style={st.natNoteT}>
+                        {nat.downloadProgress > 0 && nat.downloadProgress < 1
+                          ? `Downloading ${natVoiceById(prefs.natVoice).label}… ${Math.round(nat.downloadProgress * 100)}%`
+                          : `Preparing ${natVoiceById(prefs.natVoice).label}…`}
+                      </Text>
+                      <ActivityIndicator size="small" color={C.honey} />
+                    </View>
+                    <View style={st.bar}>
+                      <View
+                        style={[
+                          st.barFill,
+                          { width: `${Math.max(3, Math.round((nat.downloadProgress || 0) * 100))}%` },
+                        ]}
+                      />
+                    </View>
                     <Text style={st.subtle}>
-                      Best on Wi-Fi. Apple's voice keeps working meanwhile.
+                      One time, about a minute on Wi-Fi. Apple's voice keeps working meanwhile.
                     </Text>
                   </View>
                 )}
@@ -510,7 +568,14 @@ export default function App() {
             />
             <View style={st.actions}>
               <Pressable style={({ pressed }) => [st.btn, st.speak, pressed && { opacity: 0.85 }]} onPress={onSpeak}>
-                <Text style={st.speakT}>Speak</Text>
+                {speaking ? (
+                  <View style={st.speakRow}>
+                    <ActivityIndicator size="small" color="#241628" />
+                    <Text style={st.speakT}>Speaking</Text>
+                  </View>
+                ) : (
+                  <Text style={st.speakT}>Speak</Text>
+                )}
               </Pressable>
               <Pressable style={st.btnGhost} onPress={onAgain}>
                 <Text style={st.ghostT}>Again</Text>
@@ -646,22 +711,60 @@ export default function App() {
                 <Text style={st.link}>Done</Text>
               </Pressable>
             </View>
-            <ScrollView style={{ maxHeight: 420 }}>
+            <ScrollView style={{ maxHeight: 460 }}>
+              <Text style={st.groupLabel}>Natural — on device</Text>
+              <Text style={st.groupNote}>
+                Warmer and more human. Downloads once the first time, then works offline.
+              </Text>
+              {NAT_VOICES.map((v) => {
+                const on = natOn && prefs.natVoice === v.id;
+                const locked = natBusy && !on;   // can't start a second load
+                return (
+                  <Pressable
+                    key={v.id}
+                    style={[st.voiceItem, locked && { opacity: 0.35 }]}
+                    disabled={locked}
+                    onPress={() => pickNaturalVoice(v.id)}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={[st.voiceItemT, on && { color: C.honey, fontWeight: '800' }]}>
+                        {v.label}
+                      </Text>
+                      {on && natBusy && (
+                        <Text style={st.subtle}>
+                          {nat.downloadProgress > 0 && nat.downloadProgress < 1
+                            ? `Downloading… ${Math.round(nat.downloadProgress * 100)}%`
+                            : 'Preparing…'}
+                        </Text>
+                      )}
+                      {on && nat.isReady && <Text style={st.subtle}>Ready, on this device</Text>}
+                    </View>
+                    {on && natBusy && <ActivityIndicator size="small" color={C.honey} />}
+                    {on && !natBusy && <Text style={st.check}>✓</Text>}
+                  </Pressable>
+                );
+              })}
+              {natBusy && (
+                <Text style={st.groupNote}>
+                  Finishing this download first. The other voices unlock when it's done.
+                </Text>
+              )}
+
               {voices.length === 0 && (
                 <Text style={[st.empty, { paddingHorizontal: 18 }]}>
-                  No voices found yet. Close this and reopen in a moment.
+                  No system voices found yet. Close this and reopen in a moment.
                 </Text>
               )}
               <VoiceGroup
                 label="Best on this device"
                 list={goodVoices}
-                sel={prefs.voice}
+                sel={natOn ? null : prefs.voice}
                 onPick={pickVoice}
               />
               <VoiceGroup
                 label={goodVoices.length ? 'Other voices' : 'Voices'}
                 list={voices.filter((v) => scoreVoice(v) < 40)}
-                sel={prefs.voice}
+                sel={natOn ? null : prefs.voice}
                 onPick={pickVoice}
               />
             </ScrollView>
@@ -678,8 +781,8 @@ function VoiceGroup({ label, list, sel, onPick }) {
   return (
     <View>
       <Text style={st.groupLabel}>{label}</Text>
-      {list.map((v) => (
-        <Pressable key={v.identifier} style={st.voiceItem} onPress={() => onPick(v.identifier)}>
+      {list.map((v, i) => (
+        <Pressable key={(v.identifier || v.name) + i} style={st.voiceItem} onPress={() => onPick(v.identifier)}>
           <Text style={[st.voiceItemT, v.identifier === sel && { color: C.honey, fontWeight: '800' }]}>
             {cleanName(v)}
           </Text>
@@ -789,7 +892,9 @@ const st = StyleSheet.create({
   switchT: { color: C.text, fontSize: 15, fontWeight: '600' },
   subtle: { color: C.faint, fontSize: 12.5, lineHeight: 17, marginTop: 3 },
   natNote: { marginTop: 10, backgroundColor: C.ink, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: 'rgba(245,180,97,0.22)' },
-  natNoteT: { color: C.honey, fontSize: 13.5, fontWeight: '700' },
+  natNoteT: { color: C.honey, fontSize: 13.5, fontWeight: '700', flex: 1, paddingRight: 10 },
+  bar: { height: 4, borderRadius: 2, backgroundColor: C.ink3, marginTop: 9, overflow: 'hidden' },
+  barFill: { height: 4, borderRadius: 2, backgroundColor: C.honey },
   chipsTight: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 11 },
   natChip: { backgroundColor: C.ink3, borderRadius: 11, paddingVertical: 8, paddingHorizontal: 13, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
   natChipOn: { backgroundColor: C.honey, borderColor: 'transparent' },
@@ -805,6 +910,7 @@ const st = StyleSheet.create({
   btn: { borderRadius: 16, minHeight: 58, alignItems: 'center', justifyContent: 'center' },
   speak: { flex: 1, backgroundColor: C.honey },
   speakT: { color: '#241628', fontWeight: '800', fontSize: 17 },
+  speakRow: { flexDirection: 'row', alignItems: 'center', gap: 9 },
   btnGhost: { backgroundColor: C.ink3, borderRadius: 16, minHeight: 58, paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)' },
   ghostT: { color: C.muted, fontWeight: '700', fontSize: 16 },
 
@@ -846,6 +952,7 @@ const st = StyleSheet.create({
   sheetHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingVertical: 14 },
   sheetTitle: { color: C.text, fontSize: 17, fontWeight: '800' },
   groupLabel: { fontSize: 11, letterSpacing: 1.2, color: C.honeyDim, fontWeight: '700', paddingHorizontal: 18, paddingTop: 14, paddingBottom: 4 },
+  groupNote: { color: C.faint, fontSize: 12.5, lineHeight: 17, paddingHorizontal: 18, paddingBottom: 6 },
   voiceItem: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18, paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.05)' },
   voiceItemT: { color: C.text, fontSize: 16, fontWeight: '600' },
   check: { color: C.honey, fontSize: 16, fontWeight: '800' },

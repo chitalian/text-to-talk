@@ -1,13 +1,11 @@
 import { registerRootComponent } from 'expo';
-import { initExecutorch } from 'react-native-executorch';
-import { ExpoResourceFetcher } from 'react-native-executorch-expo-resource-fetcher';
+import { initExecutorch, ExpoResourceFetcher } from './src/tts';
 
 import App from './App';
 
 // Must run before any model hook mounts. Tells ExecuTorch how to fetch and
 // cache the Kokoro weights (they download on first use, not in the bundle).
-// Guarded so the web build (used for UI work in a browser) still boots, where
-// there is no native ExecuTorch runtime.
+// On web this resolves to a no-op stub (see src/tts.web.js).
 try {
   initExecutorch({ resourceFetcher: ExpoResourceFetcher });
 } catch (e) {
