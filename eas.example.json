@@ -1,0 +1,60 @@
+{
+  "_comment": [
+    "Copy this to eas.json and fill in your own values. eas.json is gitignored",
+    "because the submit block holds identifiers tied to your Apple account.",
+    "",
+    "Build profiles:",
+    "  production                - EAS manages your signing credentials for you.",
+    "  production-local-signing  - you supply your own .p12 and provisioning",
+    "                              profile via a gitignored credentials.json.",
+    "                              Delete this profile if you do not need it.",
+    "",
+    "Submit values: ascAppId is the numeric id in your App Store Connect URL,",
+    "appleTeamId is the 10-character team id, and the ascApiKey* fields point at",
+    "an App Store Connect API key you generate under Users and Access."
+  ],
+  "cli": {
+    "version": ">= 12.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "simulator": false
+      }
+    },
+    "simulator": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "simulator": true
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "ios": {
+        "simulator": false
+      }
+    },
+    "production": {
+      "autoIncrement": true
+    },
+    "production-local-signing": {
+      "extends": "production",
+      "credentialsSource": "local"
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleTeamId": "XXXXXXXXXX",
+        "ascAppId": "0000000000",
+        "ascApiKeyPath": "/absolute/path/to/AuthKey_XXXXXXXXXX.p8",
+        "ascApiKeyId": "XXXXXXXXXX",
+        "ascApiKeyIssuerId": "00000000-0000-0000-0000-000000000000"
+      }
+    }
+  }
+}

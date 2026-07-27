@@ -76,9 +76,24 @@ Account-specific identifiers live in the environment, not the repo. See
 [.env.example](.env.example). Nothing in there is a credential — they're
 identifiers for your Expo and Apple accounts.
 
-To submit to TestFlight or the App Store, merge the block from
-[eas.submit.example.json](eas.submit.example.json) into `eas.json` with your own
-values. Keep your App Store Connect `.p8` key outside the repo.
+`eas.json` is gitignored for the same reason: its submit block points at your
+Apple team, your App Store Connect app, and your API key. Copy the examples and
+fill in your own values, keeping the `.p8` key itself outside the repo.
+
+```sh
+cp .env.example .env            # Expo and Apple identifiers
+cp eas.example.json eas.json    # build and submit profiles
+```
+
+One thing that is easy to get wrong: cloud builds never see your `.env`, because
+it is gitignored and so never uploaded. Anything `app.config.js` reads has to
+exist as an EAS environment variable too, or the build falls back to the
+placeholder bundle id and fails to match your provisioning profile.
+
+```sh
+eas env:create production --name APP_BUNDLE_IDENTIFIER --value com.you.yourapp \
+  --visibility plaintext --scope project
+```
 
 ## Requirements
 

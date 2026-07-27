@@ -51,3 +51,7 @@ credentials.json
 # account-specific config - never commit
 eas.submit.local.json
 app.json
+
+# Holds Apple account identifiers; copy eas.example.json and fill in your own
+eas.json
+eas.submit.local.json
